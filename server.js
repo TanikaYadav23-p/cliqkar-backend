@@ -14,6 +14,10 @@ const airlineRoutes = require("./routes/admin/airlineRoutes");
 const settingsRoutes = require("./routes/admin/settingsRoutes");
 const contactRoutes = require("./routes/user/contactRoutes");
 const supportRoutes = require("./routes/admin/supportRoutes");
+const otbRoutes = require("./routes/user/otbRoutes");
+
+const otbApplicationRoutes =
+  require("./routes/admin/otbApplicationRoutes");
 const { notFound, errorHandler } = require("./middleware/errorMiddleware");
 
 dotenv.config();
@@ -39,6 +43,8 @@ app.use("/api/airlines", airlineRoutes);
 app.use("/api/admin/settings",settingsRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/admin/support-tickets", supportRoutes);
+app.use("/api/otb",otbRoutes);
+app.use("/api/admin/otb-applications",otbApplicationRoutes);
 app.use(notFound);
 app.use(errorHandler);
 

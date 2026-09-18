@@ -17,11 +17,17 @@ const {
   createOrUpdateAirlinePrice,
   getAirlinePrices,
   getAirlinePrice,
+  getActiveOtbPrices
 } = require("../../controllers/admin/airlineController");
 const { upload } = require("../../helpers/fileUpload");
 
 router.get("/", protect, adminOnly, getAirlines);
 
+
+router.get(
+  "/prices/active",
+  getActiveOtbPrices
+);
 router.post(
     "/",
     protect,

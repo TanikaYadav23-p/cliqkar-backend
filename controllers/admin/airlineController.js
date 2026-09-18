@@ -6,6 +6,34 @@ const { sendError } = require("../../helpers/apiResponse");
 // ======================================
 // ADD AIRLINE
 // ======================================
+// ======================================
+// GET ACTIVE OTB PRICES FOR APPLICATION
+// ======================================
+
+const getActiveOtbPrices = async (req, res) => {
+  try {
+    const prices = await AirlinePrice.find({
+      status: "Active",
+    })
+      .populate("airline", "name code status")
+      .populate("country", "countryName code status")
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      message: "Active OTB prices fetched successfully",
+      data: prices,
+    });
+  } catch (error) {
+    console.error("Get Active OTB Prices Error:", error);
+
+    return sendError(
+      res,
+      500,
+      error.message || "Error fetching active OTB prices"
+    );
+  }
+};
 const addAirline = async (req, res) => {
   try {
     const {
@@ -486,6 +514,7 @@ const getAirlinePrice = async (req, res) => {
 
 
 module.exports = {
+  getActiveOtbPrices,
   addAirline,
   getAirlines,
   getAirlineById,
