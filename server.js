@@ -6,6 +6,7 @@ const dns = require("dns");
 
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
 const authRoutes = require("./routes/user/authRoutes");
+const agentAuthRoutes = require("./routes/agent/agentAuthRoutes");
 const userRoutes = require("./routes/admin/userlistRoutes");
 const agentRoutes = require("./routes/admin/agentlistRoutes");
 const airportRoutes = require("./routes/admin/airportRoutes");
@@ -15,6 +16,7 @@ const settingsRoutes = require("./routes/admin/settingsRoutes");
 const contactRoutes = require("./routes/user/contactRoutes");
 const supportRoutes = require("./routes/admin/supportRoutes");
 const otbRoutes = require("./routes/user/otbRoutes");
+const profileRoutes = require("./routes/user/profileRoutes");
 
 const otbApplicationRoutes =
   require("./routes/admin/otbApplicationRoutes");
@@ -35,6 +37,7 @@ app.get("/", (req, res) => {
 });
 
 app.use("/api/auth", authRoutes);
+app.use("/api/auth/agent",agentAuthRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/agents", agentRoutes);
 app.use("/api/airports", airportRoutes);
@@ -45,6 +48,7 @@ app.use("/api/contact", contactRoutes);
 app.use("/api/admin/support-tickets", supportRoutes);
 app.use("/api/otb",otbRoutes);
 app.use("/api/admin/otb-applications",otbApplicationRoutes);
+app.use("/api/user/profile", profileRoutes);
 app.use(notFound);
 app.use(errorHandler);
 

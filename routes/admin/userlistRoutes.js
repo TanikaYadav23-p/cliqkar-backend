@@ -13,7 +13,7 @@ const { protect, adminOnly } = require("../../middleware/authMiddleware");
 const router = express.Router();
 
 router.use(protect);
-//router.use(adminOnly);
+router.use(adminOnly);
 
 router.get("/", getUsers);
 

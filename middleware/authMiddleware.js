@@ -31,5 +31,22 @@ const adminOnly = (req, res, next) => {
   }
   return sendError(res, 403, "Access denied, admin only");
 };
+// ========================================
+// AGENT ONLY
+// ========================================
 
-module.exports = { protect, adminOnly };
+const agentOnly = (req, res, next) => {
+  if (
+    req.user &&
+    req.user.role === "agent"
+  ) {
+    return next();
+  }
+
+  return sendError(
+    res,
+    403,
+    "Access denied, agent only"
+  );
+};
+module.exports = { protect, adminOnly, agentOnly };

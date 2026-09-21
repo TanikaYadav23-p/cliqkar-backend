@@ -2,9 +2,20 @@ const mongoose = require("mongoose");
 
 const agentSchema = new mongoose.Schema(
   {
-    // =========================
+    // ========================================
+    // LINK WITH USER ACCOUNT
+    // ========================================
+
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true,
+    },
+
+    // ========================================
     // PERSONAL DETAILS
-    // =========================
+    // ========================================
 
     fullName: {
       type: String,
@@ -25,7 +36,10 @@ const agentSchema = new mongoose.Schema(
       trim: true,
     },
 
-    // Aadhaar / PAN / Other
+    // ========================================
+    // IDENTITY PROOF
+    // ========================================
+
     identityProof: {
       proofType: {
         type: String,
@@ -44,9 +58,9 @@ const agentSchema = new mongoose.Schema(
       },
     },
 
-    // =========================
+    // ========================================
     // COMMUNICATION DETAILS
-    // =========================
+    // ========================================
 
     address: {
       type: String,
@@ -72,7 +86,10 @@ const agentSchema = new mongoose.Schema(
       trim: true,
     },
 
-    // Office Proof
+    // ========================================
+    // OFFICE PROOF
+    // ========================================
+
     officeProof: {
       documentUrl: {
         type: String,
@@ -85,9 +102,9 @@ const agentSchema = new mongoose.Schema(
       },
     },
 
-    // =========================
+    // ========================================
     // GST DETAILS
-    // =========================
+    // ========================================
 
     havingGST: {
       type: Boolean,

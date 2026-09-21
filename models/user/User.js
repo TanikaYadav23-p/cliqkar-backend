@@ -11,25 +11,46 @@ const userSchema = new mongoose.Schema(
 
     email: {
       type: String,
+      required: [true, "Email is required"],
       lowercase: true,
       trim: true,
       unique: true,
-      sparse: true,
-      default: null,
     },
 
     phoneNumber: {
       type: String,
+      required: [true, "Phone number is required"],
       trim: true,
       unique: true,
-      sparse: true,
-      default: null,
     },
 
     country: {
       type: String,
       required: [true, "Country is required"],
       trim: true,
+    },
+
+    // Profile fields
+    dob: {
+      type: String,
+      default: "",
+    },
+
+    gender: {
+      type: String,
+      enum: ["Male", "Female", "Others"],
+      default: "Male",
+    },
+
+    address: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    profilePhoto: {
+      type: String,
+      default: "",
     },
 
     password: {
@@ -51,7 +72,10 @@ const userSchema = new mongoose.Schema(
 );
 
 
-// Password hash before saving
+// =====================================================
+// PASSWORD HASH BEFORE SAVING
+// =====================================================
+
 userSchema.pre("save", async function (next) {
   if (!this.isModified("password")) {
     return next();
@@ -65,7 +89,10 @@ userSchema.pre("save", async function (next) {
 });
 
 
-// Compare password
+// =====================================================
+// COMPARE PASSWORD
+// =====================================================
+
 userSchema.methods.matchPassword = async function (enteredPassword) {
   return bcrypt.compare(enteredPassword, this.password);
 };

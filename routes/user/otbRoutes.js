@@ -7,11 +7,11 @@ const {
 } = require("../../middleware/authMiddleware");
 
 const {
-  createOtbApplication,
+  createOtbApplication,getMyOtbApplications
 } = require("../../controllers/admin/otbApplicationController");
 
 const {
-  upload,
+  upload
 } = require("../../helpers/fileUpload");
 
 /*
@@ -27,7 +27,13 @@ const {
 router.post(
   "/apply",
   upload.any(),
+  protect,
   createOtbApplication
+);
+router.get(
+  "/my-applications",
+  protect,
+  getMyOtbApplications
 );
 
 module.exports = router;

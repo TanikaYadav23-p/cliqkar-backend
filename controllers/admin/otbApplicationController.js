@@ -335,7 +335,7 @@ exports.createOtbApplication = async (req, res) => {
         agentName,
 
         applicantUser:
-          user?._id || null,
+          user?.id || null,
 
         travelers:
           normalizedTravelers,
@@ -835,3 +835,43 @@ exports.searchOtbApplications =
       });
     }
   };
+
+/* =========================================================
+   USER - GET MY OTB APPLICATIONS
+========================================================= */
+
+exports.getMyOtbApplications = async (req, res) => {
+  try {
+    const applications = await OTBApplication.find({
+      applicantUser: req.user.id,
+    })
+      .populate(
+        "goingTo",
+        "countryName code status"
+      )
+      .populate(
+        "airline",
+        "name code status"
+      )
+      .sort({
+        createdAt: -1,
+      });
+
+    return res.json({
+      success: true,
+      data: applications,
+    });
+  } catch (error) {
+    console.error(
+      "Get my OTB applications error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        error.message ||
+        "Failed to fetch your OTB applications.",
+    });
+  }
+};

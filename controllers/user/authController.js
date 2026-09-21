@@ -140,6 +140,7 @@ const signup = async (req, res) => {
     const {
       fullName,
       identifier,
+      phoneNumber,
       country,
       password,
       confirmPassword,
@@ -150,6 +151,7 @@ const signup = async (req, res) => {
     if (
       !fullName ||
       !identifier ||
+      !phoneNumber ||
       !country ||
       !password ||
       !confirmPassword
@@ -166,46 +168,37 @@ const signup = async (req, res) => {
         "Password and Confirm Password do not match"
       );
     }
+const normalizedEmail = identifier.toLowerCase().trim();
+const normalizedPhone = phoneNumber.trim();
 
+const existingEmail = await User.findOne({
+  email: normalizedEmail,
+});
 
-    let email = null;
-    let phoneNumber = null;
+if (existingEmail) {
+  return sendError(
+    res,
+    409,
+    "An account with this email already exists"
+  );
+}
 
+const existingPhone = await User.findOne({
+  phoneNumber: normalizedPhone,
+});
 
-    // Check whether identifier is Email or Phone
-    if (identifier.includes("@")) {
-      email = identifier.toLowerCase().trim();
+if (existingPhone) {
+  return sendError(
+    res,
+    409,
+    "An account with this phone number already exists"
+  );
+}
 
-      const existingUser = await User.findOne({ email });
-
-      if (existingUser) {
-        return sendError(
-          res,
-          409,
-          "An account with this email already exists"
-        );
-      }
-
-    } else {
-      phoneNumber = identifier.trim();
-
-      const existingUser = await User.findOne({ phoneNumber });
-
-      if (existingUser) {
-        return sendError(
-          res,
-          409,
-          "An account with this phone number already exists"
-        );
-      }
-    }
-
-
-    // Create user
     const user = await User.create({
       fullName,
-      email,
-      phoneNumber,
+      email: normalizedEmail,
+      phoneNumber: normalizedPhone,
       country,
       password,
       role: "user",
