@@ -2,724 +2,461 @@ const { sendSuccess, sendError } = require("../../helpers/apiResponse");
 const { createWorker } = require("tesseract.js");
 const { parse } = require("mrz");
 
-const extractPassportData = async (req, res) => {
-  let worker = null;
-
-  try {
-    // -----------------------------------
-    // 1. CHECK FILE
-    // -----------------------------------
-
-    if (!req.file) {
-      return sendError(
-        res,
-        400,
-        "Passport document is required"
-      );
-    }
-
-    console.log("Passport received:");
-    console.log("Name:", req.file.originalname);
-    console.log("Type:", req.file.mimetype);
-    console.log("Size:", req.file.size);
-
-    // -----------------------------------
-    // 2. CREATE OCR WORKER
-    // -----------------------------------
-
-    worker = await createWorker("eng");
-
-    console.log("OCR started...");
-
-    // -----------------------------------
-    // 3. READ PASSPORT IMAGE
-    // -----------------------------------
-
-    const result = await worker.recognize(req.file.buffer);
-
-    const rawText = result?.data?.text || "";
-
-    console.log("========== OCR TEXT ==========");
-    console.log(rawText);
-    console.log("==============================");
-
-    // -----------------------------------
-    // 4. CLEAN OCR TEXT
-    // -----------------------------------
-
-    const cleanedText = rawText
-      .toUpperCase()
-      .replace(/\r/g, "")
-      .split("\n")
-      .map((line) =>
-        line
-          .replace(/[^A-Z0-9<]/g, "")
-          .trim()
-      )
-      .filter(Boolean);
-
-    console.log("========== CLEANED TEXT ==========");
-    console.log(cleanedText);
-    console.log("==================================");
-
-    // -----------------------------------
-    // 5. FIND PASSPORT MRZ
-    // -----------------------------------
-
-    let mrzLines = [];
-
-    for (let i = 0; i < cleanedText.length - 1; i++) {
-      const line1 = cleanedText[i];
-      const line2 = cleanedText[i + 1];
-
-      if (
-        line1.length >= 35 &&
-        line2.length >= 35
-      ) {
-        mrzLines = [
-          line1,
-          line2,
-        ];
-
-        break;
-      }
-    }
-
-    if (mrzLines.length !== 2) {
-      await worker.terminate();
-      worker = null;
-
-      return sendError(
-        res,
-        422,
-        "Passport MRZ could not be detected. Please upload a clear passport image."
-      );
-    }
-
-    console.log("========== ORIGINAL MRZ ==========");
-    console.log(mrzLines);
-    console.log("==================================");
-
-    // -----------------------------------
-    // 6. NORMALIZE MRZ
-    // -----------------------------------
-
-    const normalizeMrzLine = (
-      line,
-      expectedLength = 44
-    ) => {
-      let value = line
-        .toUpperCase()
-        .replace(/[^A-Z0-9<]/g, "");
-
-      // OCR kabhi extra characters read kar leta hai
-      if (value.length > expectedLength) {
-        value = value.slice(0, expectedLength);
-      }
-
-      // Agar characters kam hain
-      if (value.length < expectedLength) {
-        value = value.padEnd(
-          expectedLength,
-          "<"
-        );
-      }
-
-      return value;
-    };
-
-    mrzLines = [
-      normalizeMrzLine(mrzLines[0]),
-      normalizeMrzLine(mrzLines[1]),
-    ];
-
-    console.log(
-      "========== NORMALIZED MRZ =========="
-    );
-
-    console.log(mrzLines);
-
-    console.log(
-      "Line 1 length:",
-      mrzLines[0].length
-    );
-
-    console.log(
-      "Line 2 length:",
-      mrzLines[1].length
-    );
-
-    console.log(
-      "====================================="
-    );
-
-    // -----------------------------------
-    // 7. PARSE MRZ
-    // -----------------------------------
-
-    let parsed;
-
-    try {
-      parsed = parse(mrzLines, {
-        autocorrect: true,
-      });
-    } catch (error) {
-      console.error(
-        "MRZ parse error:",
-        error
-      );
-
-      await worker.terminate();
-      worker = null;
-
-      return sendError(
-        res,
-        422,
-        "Passport details could not be read. Please upload a clearer image."
-      );
-    }
-
-    console.log(
-      "========== PARSED MRZ =========="
-    );
-
-    console.log(parsed);
-
-    console.log(
-      "================================"
-    );
-
-    // -----------------------------------
-    // 8. CHECK PARSED RESULT
-    // -----------------------------------
-
-    if (
-      !parsed ||
-      !parsed.fields
-    ) {
-      await worker.terminate();
-      worker = null;
-
-      return sendError(
-        res,
-        422,
-        "Unable to extract passport details."
-      );
-    }
-
-    const fields = parsed.fields;
-
-    console.log(
-      "========== MRZ FIELDS =========="
-    );
-
-    console.log(fields);
-
-    console.log(
-      "================================="
-    );
-
-    // -----------------------------------
-    // 9. FORMAT DATE OF BIRTH
-    // -----------------------------------
-
-    // -----------------------------------
-// 9. FORMAT DATE OF BIRTH
-// -----------------------------------
-
-let dateOfBirth = "";
-
-if (fields.birthDate) {
-  const birthDate = String(
-    fields.birthDate
-  ).trim();
-
-  // MRZ DOB format = YYMMDD
-  // Example: 750505 = 05/05/1975
-
-  if (/^\d{6}$/.test(birthDate)) {
-    const yy = birthDate.substring(0, 2);
-    const mm = birthDate.substring(2, 4);
-    const dd = birthDate.substring(4, 6);
-
-    const yearNumber = Number(yy);
-
-    // Passport DOB ke liye
-    // 00-26 => 2000-2026
-    // 27-99 => 1927-1999
-    const fullYear =
-      yearNumber <= 26
-        ? 2000 + yearNumber
-        : 1900 + yearNumber;
-
-    dateOfBirth =
-      `${fullYear}-${mm}-${dd}`;
-  }
-}
-
-// -----------------------------------
-// 10. NORMALIZE SEX
-// -----------------------------------
-
-let sex = "";
-
-if (fields.sex) {
-  const value = String(
-    fields.sex
-  ).toUpperCase();
-
-  if (
-    value === "M" ||
-    value === "MALE"
-  ) {
-    sex = "Male";
-  } else if (
-    value === "F" ||
-    value === "FEMALE"
-  ) {
-    sex = "Female";
-  }
-}
-
-// -----------------------------------
-// 11. EXTRACT PLACE OF BIRTH
-// -----------------------------------
-
-let placeOfBirth = "";
-
-// OCR text se Place of Birth
-// identify karne ki koshish
-
-const placeOfBirthMatch =
-  rawText.match(
-    /Place\s+of\s+Birth[\s\S]{0,100}?([A-Z][A-Z\s,.-]{3,})/i
-  );
-
-if (placeOfBirthMatch?.[1]) {
-  placeOfBirth =
-    placeOfBirthMatch[1]
-      .replace(/\n/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-}
-
-// Agar label-based extraction fail ho,
-// known OCR pattern se fallback
-if (!placeOfBirth) {
-  const lines = rawText
-    .toUpperCase()
+// =====================================================
+// COMMON HELPERS
+// =====================================================
+
+const cleanTextLines = (text = "") =>
+  String(text)
+    .replace(/\r/g, "")
     .split("\n")
     .map((line) =>
       line
-        .replace(/[^A-Z0-9,.\s-]/g, "")
+        .replace(/[^A-Z0-9<]/gi, " ")
         .replace(/\s+/g, " ")
         .trim()
+        .toUpperCase()
     )
     .filter(Boolean);
 
-  const placeIndex = lines.findIndex(
-    (line) =>
-      line.includes("PRACA OF") ||
-      line.includes("PLACE OF B") ||
-      line.includes("PLACE OF")
+const validISODate = (year, month, day) => {
+  const d = new Date(
+    Date.UTC(Number(year), Number(month) - 1, Number(day))
   );
 
   if (
-    placeIndex !== -1 &&
-    lines[placeIndex + 1]
+    d.getUTCFullYear() !== Number(year) ||
+    d.getUTCMonth() !== Number(month) - 1 ||
+    d.getUTCDate() !== Number(day)
   ) {
-    placeOfBirth =
-      lines[placeIndex + 1].trim();
+    return "";
   }
 
-  // Tumhare OCR output ke liye
-  // direct fallback
-  if (
-    !placeOfBirth &&
-    lines.some((line) =>
-      line.includes("JAMNAGAR")
-    )
-  ) {
-    placeOfBirth =
-      lines.find((line) =>
-        line.includes("JAMNAGAR")
-      ) || "";
-  }
-}
-
-// -----------------------------------
-// 12. PREPARE PASSPORT DATA
-// -----------------------------------
-
-const passportData = {
-  firstName:
-    fields.firstName
-      ?.replace(/<+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim() || "",
-
-  lastName:
-    fields.lastName
-      ?.replace(/<+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim() || "",
-
-  passportNumber:
-    fields.documentNumber || "",
-
-  nationality:
-    fields.nationality || "",
-
-  sex,
-
-  dateOfBirth,
-
-  placeOfBirth,
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(
+    2,
+    "0"
+  )}-${String(day).padStart(2, "0")}`;
 };
-    console.log(
-      "========== PASSPORT DATA =========="
-    );
 
-    console.log(passportData);
+const parseMrzDate = (value = "") => {
+  const digits = String(value).replace(/\D/g, "");
 
-    console.log(
-      "==================================="
-    );
+  if (!/^\d{6}$/.test(digits)) {
+    return "";
+  }
 
-    // -----------------------------------
-    // 12. TERMINATE OCR WORKER
-    // -----------------------------------
+  const yy = Number(digits.slice(0, 2));
+  const nowYY = new Date().getFullYear() % 100;
+
+  // Passport DOBs are in the past.
+  const year =
+    yy <= (nowYY + 1) % 100 && yy < 80
+      ? 2000 + yy
+      : 1900 + yy;
+
+  return validISODate(
+    year,
+    digits.slice(2, 4),
+    digits.slice(4, 6)
+  );
+};
+
+const normalizeMrzCandidate = (line) => {
+  let value = String(line || "")
+    .toUpperCase()
+    .replace(/\s/g, "")
+    .replace(/[^A-Z0-9<]/g, "");
+
+  // Do not pad short OCR lines because padding can shift MRZ fields.
+  if (value.length === 45 && value.endsWith("<")) {
+    value = value.slice(0, 44);
+  }
+
+  if (value.length !== 44) {
+    return null;
+  }
+
+  return value;
+};
+
+// =====================================================
+// PASSPORT OCR
+// =====================================================
+
+const extractPassportData = async (req, res) => {
+  let worker;
+
+  try {
+    if (!req.file?.buffer) {
+      return sendError(res, 400, "Passport document is required");
+    }
+
+    worker = await createWorker("eng");
+
+    const { data } = await worker.recognize(req.file.buffer);
+    const rawText = data?.text || "";
+
+    console.log("Passport OCR text:", rawText);
+
+    const lines = cleanTextLines(rawText);
+    const candidates = lines
+      .map(normalizeMrzCandidate)
+      .filter(Boolean);
+
+    let parsed = null;
+    let parseError = null;
+
+    // Passport MRZ normally contains two 44-character lines.
+    for (let i = 0; i < candidates.length - 1; i++) {
+      try {
+        const result = parse(
+          [candidates[i], candidates[i + 1]],
+          { autocorrect: true }
+        );
+
+        if (
+          result?.fields &&
+          (
+            result.fields.documentNumber ||
+            result.fields.firstName ||
+            result.fields.lastName
+          )
+        ) {
+          parsed = result;
+          break;
+        }
+      } catch (err) {
+        parseError = err;
+      }
+    }
+
+    if (!parsed?.fields) {
+      console.warn(
+        "Passport MRZ not parsed:",
+        parseError?.message || "No valid 44-character MRZ pair"
+      );
+
+      return sendError(
+        res,
+        422,
+        "Passport details could not be read. Upload a clear image of the passport photo/biodata page with the two MRZ lines visible."
+      );
+    }
+
+    const f = parsed.fields;
+
+    const firstName = String(f.firstName || "")
+      .replace(/<+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const lastName = String(f.lastName || "")
+      .replace(/<+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const passportNumber = String(f.documentNumber || "")
+      .replace(/</g, "")
+      .trim()
+      .toUpperCase();
+
+    const nationality = String(f.nationality || "")
+      .trim()
+      .toUpperCase();
+
+    const sexValue = String(f.sex || "").toUpperCase();
+
+    const sex =
+      sexValue === "M"
+        ? "Male"
+        : sexValue === "F"
+        ? "Female"
+        : "";
+
+    const dateOfBirth = parseMrzDate(f.birthDate);
 
     await worker.terminate();
     worker = null;
-
-    // -----------------------------------
-    // 13. SEND RESPONSE
-    // -----------------------------------
 
     return sendSuccess(
       res,
       200,
       "Passport processed successfully",
       {
-        data: passportData,
+        data: {
+          firstName,
+          lastName,
+          passportNumber,
+          nationality,
+          sex,
+          dateOfBirth,
+          placeOfBirth: "",
+        },
       }
     );
-
   } catch (error) {
-
-    console.error(
-      "Passport extraction error:",
-      error
-    );
-
-    // -----------------------------------
-    // CLEANUP OCR WORKER
-    // -----------------------------------
-
-    if (worker) {
-      try {
-        await worker.terminate();
-      } catch (terminateError) {
-        console.error(
-          "OCR worker termination error:",
-          terminateError
-        );
-      }
-    }
+    console.error("Passport extraction error:", error);
 
     return sendError(
       res,
       500,
       "Unable to read passport document"
     );
+  } finally {
+    if (worker) {
+      try {
+        await worker.terminate();
+      } catch (e) {
+        console.error("Passport OCR cleanup error:", e);
+      }
+    }
   }
 };
 
-// =====================================
-// EXTRACT PAN CARD DATA
-// =====================================
+// =====================================================
+// PAN HELPERS
+// =====================================================
+
+const normalizePanCandidate = (text = "") => {
+  const compact = String(text)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+
+  const direct = compact.match(/[A-Z]{5}[0-9]{4}[A-Z]/);
+
+  if (direct) {
+    return direct[0];
+  }
+
+  // Correct common OCR character confusions by PAN position.
+  if (compact.length < 10) {
+    return "";
+  }
+
+  const sample = compact.slice(0, 10).split("");
+
+  const toLetter = {
+    "0": "O",
+    "1": "I",
+    "5": "S",
+    "8": "B",
+  };
+
+  const toDigit = {
+    O: "0",
+    Q: "0",
+    D: "0",
+    I: "1",
+    L: "1",
+    Z: "2",
+    S: "5",
+    G: "6",
+    B: "8",
+  };
+
+  for (let i = 0; i < 5; i++) {
+    sample[i] = /[A-Z]/.test(sample[i])
+      ? sample[i]
+      : toLetter[sample[i]] || sample[i];
+  }
+
+  for (let i = 5; i < 9; i++) {
+    sample[i] = /\d/.test(sample[i])
+      ? sample[i]
+      : toDigit[sample[i]] || sample[i];
+  }
+
+  sample[9] = /[A-Z]/.test(sample[9])
+    ? sample[9]
+    : toLetter[sample[9]] || sample[9];
+
+  const candidate = sample.join("");
+
+  return /^[A-Z]{5}\d{4}[A-Z]$/.test(candidate)
+    ? candidate
+    : "";
+};
+
+// =====================================================
+// PAN OCR
+// =====================================================
 
 const extractPanData = async (req, res) => {
-    let worker = null;
-  
-    try {
-      // -----------------------------------
-      // 1. CHECK FILE
-      // -----------------------------------
-  
-      if (!req.file) {
-        return sendError(
-          res,
-          400,
-          "PAN card document is required"
-        );
-      }
-  
-      console.log("========== PAN CARD RECEIVED ==========");
-      console.log("Name:", req.file.originalname);
-      console.log("Type:", req.file.mimetype);
-      console.log("Size:", req.file.size);
-      console.log("=======================================");
-  
-      // -----------------------------------
-      // 2. CREATE OCR WORKER
-      // -----------------------------------
-  
-      worker = await createWorker("eng");
-  
-      console.log("PAN OCR started...");
-  
-      // -----------------------------------
-      // 3. READ PAN IMAGE
-      // -----------------------------------
-  
-      const result = await worker.recognize(
-        req.file.buffer
-      );
-  
-      const rawText =
-        result?.data?.text || "";
-  
-      console.log(
-        "========== PAN OCR TEXT =========="
-      );
-  
-      console.log(rawText);
-  
-      console.log(
-        "=================================="
-      );
-  
-      // -----------------------------------
-      // 4. CLEAN TEXT
-      // -----------------------------------
-  
-      const cleanedText = rawText
-        .toUpperCase()
-        .replace(/\r/g, "")
-        .split("\n")
-        .map((line) =>
-          line
-            .replace(/[^A-Z0-9\s\/.-]/g, " ")
-            .replace(/\s+/g, " ")
-            .trim()
-        )
-        .filter(Boolean);
-  
-      console.log(
-        "========== PAN CLEANED TEXT =========="
-      );
-  
-      console.log(cleanedText);
-  
-      console.log(
-        "======================================="
-      );
-  
-      // -----------------------------------
-      // 5. FIND PAN NUMBER
-      // -----------------------------------
-  
-      let panNumber = "";
-  
-      // Standard PAN format:
-      // ABCDE1234F
-  
-      const panRegex =
-        /\b[A-Z]{5}[0-9]{4}[A-Z]\b/;
-  
-      const panMatch =
-        rawText
-          .toUpperCase()
+  let worker;
+
+  try {
+    if (!req.file?.buffer) {
+      return sendError(res, 400, "PAN card document is required");
+    }
+
+    worker = await createWorker("eng");
+
+    const { data } = await worker.recognize(req.file.buffer);
+    const rawText = data?.text || "";
+
+    console.log("PAN OCR text:", rawText);
+
+    const lines = cleanTextLines(rawText)
+      .map((line) =>
+        line
+          .replace(/</g, " ")
           .replace(/\s+/g, " ")
-          .match(panRegex);
-  
-      if (panMatch) {
-        panNumber = panMatch[0];
+          .trim()
+      )
+      .filter(Boolean);
+
+    // -------------------------------
+    // PAN NUMBER
+    // -------------------------------
+
+    let panNumber = "";
+
+    for (const line of lines) {
+      panNumber = normalizePanCandidate(line);
+
+      if (panNumber) {
+        break;
       }
-  
-      // -----------------------------------
-      // 6. FIND DATE OF BIRTH
-      // -----------------------------------
-  
-      let dateOfBirth = "";
-  
-      const dobRegex =
-        /\b(\d{2}[\/.-]\d{2}[\/.-]\d{4})\b/;
-  
-      const dobMatch =
-        rawText.match(dobRegex);
-  
-      if (dobMatch) {
-        const dateValue =
-          dobMatch[1].replace(/\./g, "/")
-            .replace(/-/g, "/");
-  
-        const [day, month, year] =
-          dateValue.split("/");
-  
-        dateOfBirth =
-          `${year}-${month}-${day}`;
-      }
-  
-      // -----------------------------------
-      // 7. FIND NAME
-      // -----------------------------------
-  
-      let name = "";
-  
-      const upperText =
-        rawText.toUpperCase();
-  
-      const nameIndex =
-        upperText.indexOf("NAME");
-  
-      if (nameIndex !== -1) {
-        const afterName =
-          upperText.substring(
-            nameIndex + 4
-          );
-  
-        const nameLines =
-          afterName
-            .split("\n")
-            .map((line) =>
-              line
-                .replace(
-                  /[^A-Z\s]/g,
-                  ""
-                )
-                .replace(/\s+/g, " ")
-                .trim()
-            )
-            .filter(Boolean);
-  
-        if (nameLines.length) {
-          name =
-            nameLines[0];
-        }
-      }
-  
-      // -----------------------------------
-      // 8. FALLBACK NAME DETECTION
-      // -----------------------------------
-  
-      if (!name) {
-        const possibleNames =
-          cleanedText.filter(
-            (line) => {
-              const words =
-                line.split(" ");
-  
-              return (
-                words.length >= 2 &&
-                words.length <= 5 &&
-                line.length >= 5 &&
-                !panRegex.test(line) &&
-                !line.includes("INCOME") &&
-                !line.includes("TAX") &&
-                !line.includes("GOVERNMENT") &&
-                !line.includes("DEPARTMENT") &&
-                !line.includes("SIGNATURE") &&
-                !line.includes("PERMANENT")
-              );
-            }
-          );
-  
-        if (possibleNames.length) {
-          name =
-            possibleNames[0];
-        }
-      }
-  
-      // -----------------------------------
-      // 9. CLEAN PAN NUMBER
-      // -----------------------------------
-  
-      panNumber =
-        panNumber
-          .replace(/\s/g, "")
+    }
+
+    if (!panNumber) {
+      panNumber = normalizePanCandidate(rawText);
+    }
+
+    // -------------------------------
+    // CARDHOLDER NAME
+    // -------------------------------
+
+    const nameLabels = [
+      /^NAME\s*[:.-]?\s*(.*)$/i,
+      /^CARD\s*HOLDER\s*NAME\s*[:.-]?\s*(.*)$/i,
+    ];
+
+    let name = "";
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      const label = nameLabels
+        .map((re) => line.match(re))
+        .find(Boolean);
+
+      if (label) {
+        const sameLine = (label[1] || "")
+          .replace(/[^A-Z ]/gi, " ")
+          .replace(/\s+/g, " ")
           .trim();
-  
-      // -----------------------------------
-      // 10. LOG FINAL DATA
-      // -----------------------------------
-  
-      const panData = {
-        panNumber,
-        name,
-        dateOfBirth,
-      };
-  
-      console.log(
-        "========== PAN DATA =========="
-      );
-  
-      console.log(panData);
-  
-      console.log(
-        "=============================="
-      );
-  
-      // -----------------------------------
-      // 11. TERMINATE WORKER
-      // -----------------------------------
-  
-      await worker.terminate();
-  
-      worker = null;
-  
-      // -----------------------------------
-      // 12. VALIDATE PAN
-      // -----------------------------------
-  
-      if (!panNumber) {
-        return sendError(
-          res,
-          422,
-          "PAN number could not be detected. Please upload a clear PAN card image."
-        );
-      }
-  
-      // -----------------------------------
-      // 13. SEND RESPONSE
-      // -----------------------------------
-  
-      return sendSuccess(
-        res,
-        200,
-        "PAN card processed successfully",
-        {
-          data: panData,
+
+        const nextLine = (lines[i + 1] || "")
+          .replace(/[^A-Z ]/gi, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        name = sameLine || nextLine;
+
+        if (
+          name &&
+          !/^(FATHER|FATHERS|DATE|DOB|PERMANENT|ACCOUNT|INCOME|TAX|GOVERNMENT|INDIA)\b/i.test(
+            name
+          )
+        ) {
+          break;
         }
+
+        name = "";
+      }
+    }
+
+    // Alternate OCR label variants.
+    if (!name) {
+      const idx = lines.findIndex(
+        (line) =>
+          /\bNAME\b/.test(line) &&
+          !/FATHER/.test(line)
       );
-  
-    } catch (error) {
-  
-      console.error(
-        "PAN extraction error:",
-        error
-      );
-  
-      if (worker) {
-        try {
-          await worker.terminate();
-        } catch (terminateError) {
-          console.error(
-            "PAN worker termination error:",
-            terminateError
-          );
+
+      if (idx >= 0) {
+        const candidate =
+          lines[idx]
+            .replace(/^.*?\bNAME\b\s*[:.-]?\s*/, "")
+            .replace(/[^A-Z ]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim() ||
+          (lines[idx + 1] || "");
+
+        if (
+          candidate &&
+          !/FATHER|DATE|INCOME|TAX|GOVERNMENT|PERMANENT/i.test(
+            candidate
+          )
+        ) {
+          name = candidate
+            .replace(/[^A-Z ]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
         }
       }
-  
-      return sendError(
-        res,
-        500,
-        "Unable to read PAN card document"
+    }
+
+    // -------------------------------
+    // DATE OF BIRTH
+    // -------------------------------
+
+    let dateOfBirth = "";
+
+    const dobMatch = rawText.match(
+      /\b(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})\b/
+    );
+
+    if (dobMatch) {
+      dateOfBirth = validISODate(
+        dobMatch[3],
+        dobMatch[2],
+        dobMatch[1]
       );
     }
-  };
+
+    await worker.terminate();
+    worker = null;
+
+    if (!panNumber) {
+      return sendError(
+        res,
+        422,
+        "PAN number could not be detected. Upload a clear, straight PAN card image."
+      );
+    }
+
+    return sendSuccess(
+      res,
+      200,
+      "PAN card processed successfully",
+      {
+        data: {
+          panNumber,
+          name,
+          dateOfBirth,
+        },
+      }
+    );
+  } catch (error) {
+    console.error("PAN extraction error:", error);
+
+    return sendError(
+      res,
+      500,
+      "Unable to read PAN card document"
+    );
+  } finally {
+    if (worker) {
+      try {
+        await worker.terminate();
+      } catch (e) {
+        console.error("PAN OCR cleanup error:", e);
+      }
+    }
+  }
+};
 
 module.exports = {
   extractPassportData,
