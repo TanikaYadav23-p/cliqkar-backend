@@ -22,8 +22,7 @@ const {
 // ===============================
 router.get(
   "/",
-  protect,
-  adminOnly,
+
   getAirports
 );
 
@@ -44,8 +43,7 @@ router.post(
 // ===============================
 router.get(
   "/:id",
-  protect,
-  adminOnly,
+  
   getAirportById
 );
 

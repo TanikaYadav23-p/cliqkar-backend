@@ -17,13 +17,13 @@ const {
 } = require("../../controllers/admin/countryController");
 
 // Get Country List
-router.get("/", protect, adminOnly, getCountries);
+router.get("/", protect, getCountries);
 
 // Add Country
 router.post("/", protect, adminOnly, addCountry);
 
 // Get Single Country
-router.get("/:id", protect, adminOnly, getCountryById);
+router.get("/:id", protect, getCountryById);
 
 // Update Country
 router.put("/:id", protect, adminOnly, updateCountry);

@@ -21,7 +21,7 @@ const {
 } = require("../../controllers/admin/airlineController");
 const { upload } = require("../../helpers/fileUpload");
 
-router.get("/", protect, adminOnly, getAirlines);
+router.get("/", getAirlines);
 
 
 router.get(
@@ -67,8 +67,7 @@ router.post(
 
 router.get(
   "/:id",
-  protect,
-  adminOnly,
+  
   getAirlineById
 );
 
