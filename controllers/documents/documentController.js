@@ -4,21 +4,25 @@ const { parse } = require("mrz");
 const sharp = require("sharp");
 
 // =====================================================
-// COMMON HELPERS
+// DATE VALIDATION
 // =====================================================
-
-const normalizeText = (value = "") =>
-  String(value)
-    .replace(/\r/g, "")
-    .replace(/[ \t]+/g, " ")
-    .trim();
 
 const validISODate = (year, month, day) => {
   const y = Number(year);
   const m = Number(month);
   const d = Number(day);
 
-  if (!y || m < 1 || m > 12 || d < 1 || d > 31) {
+  if (
+    !Number.isInteger(y) ||
+    !Number.isInteger(m) ||
+    !Number.isInteger(d) ||
+    y < 1900 ||
+    y > new Date().getFullYear() ||
+    m < 1 ||
+    m > 12 ||
+    d < 1 ||
+    d > 31
+  ) {
     return "";
   }
 
@@ -41,19 +45,27 @@ const validISODate = (year, month, day) => {
 const parseMrzDate = (value = "") => {
   const digits = String(value).replace(/\D/g, "");
 
-  if (!/^\d{6}$/.test(digits)) return "";
+  if (!/^\d{6}$/.test(digits)) {
+    return "";
+  }
 
-  const yy = Number(digits.slice(0, 2));
-  const month = digits.slice(2, 4);
-  const day = digits.slice(4, 6);
+  const yy = Number(digits.substring(0, 2));
+  const month = digits.substring(2, 4);
+  const day = digits.substring(4, 6);
 
-  // Current-century pivot for DOBs:
-  // 00–current year => 2000s; remaining years => 1900s.
+  // Two-digit year interpretation.
+  // Current year and future years use 2000;
+  // older years use 1900.
   const currentYY = new Date().getFullYear() % 100;
+
   const year = yy <= currentYY ? 2000 + yy : 1900 + yy;
 
   return validISODate(year, month, day);
 };
+
+// =====================================================
+// TEXT HELPERS
+// =====================================================
 
 const normalizeMrzLine = (line = "") =>
   String(line)
@@ -61,72 +73,85 @@ const normalizeMrzLine = (line = "") =>
     .replace(/\s/g, "")
     .replace(/[^A-Z0-9<]/g, "");
 
-const cleanPanText = (text = "") =>
+const cleanOcrLines = (text = "") =>
   String(text)
-    .toUpperCase()
     .replace(/\r/g, "")
     .split("\n")
     .map((line) => line.replace(/[ \t]+/g, " ").trim())
     .filter(Boolean);
 
-// Preprocess image for OCR. Keep the original dimensions/contents,
-// but improve contrast and readability.
+// =====================================================
+// IMAGE PREPROCESSING
+// =====================================================
+
 const preprocessImage = async (buffer, options = {}) => {
-  const image = sharp(buffer, { failOn: "none" });
-  const metadata = await image.metadata();
+  const metadata = await sharp(buffer, {
+    failOn: "none",
+  }).metadata();
 
-  let pipeline = image.rotate().grayscale().normalize().sharpen();
+  const width = metadata.width || 1600;
+  const height = metadata.height || 1000;
 
-  if (options.passport) {
-    // MRZ is normally printed at the bottom of the passport biodata page.
-    // Crop only the lower portion for a dedicated MRZ OCR attempt.
-    const width = metadata.width || 0;
-    const height = metadata.height || 0;
+  let pipeline = sharp(buffer, {
+    failOn: "none",
+  }).rotate();
 
-    if (width > 0 && height > 0) {
-      const top = Math.floor(height * 0.58);
-      const cropHeight = height - top;
+  if (options.crop === "mrz") {
+    const top = Math.floor(height * 0.5);
 
-      pipeline = sharp(buffer, { failOn: "none" })
-        .rotate()
-        .extract({
-          left: 0,
-          top,
-          width,
-          height: cropHeight,
-        })
-        .grayscale()
-        .normalize()
-        .sharpen();
-    }
+    pipeline = pipeline.extract({
+      left: 0,
+      top,
+      width,
+      height: Math.max(1, height - top),
+    });
+  }
+
+  if (options.crop === "lower") {
+    const top = Math.floor(height * 0.4);
+
+    pipeline = pipeline.extract({
+      left: 0,
+      top,
+      width,
+      height: Math.max(1, height - top),
+    });
+  }
+
+  pipeline = pipeline.grayscale().normalize().sharpen();
+
+  if (options.threshold) {
+    pipeline = pipeline.threshold(options.threshold);
   }
 
   return pipeline
     .resize({
-      width: 2200,
+      width: options.width || 2800,
       withoutEnlargement: false,
     })
     .png()
     .toBuffer();
 };
 
+// =====================================================
+// OCR WORKER
+// =====================================================
+
 const createOcrWorker = async () => {
   const worker = await createWorker("eng");
 
   await worker.setParameters({
     preserve_interword_spaces: "1",
+    user_defined_dpi: "300",
   });
 
   return worker;
 };
 
 // =====================================================
-// PASSPORT MRZ HELPERS
+// FIND PASSPORT MRZ PAIRS
 // =====================================================
 
-// Passport TD3 MRZ:
-// Line 1 starts with P< and contains names.
-// Line 2 contains document number, nationality, DOB, sex, expiry, etc.
 const findPassportMrzPairs = (text = "") => {
   const lines = String(text)
     .toUpperCase()
@@ -137,64 +162,318 @@ const findPassportMrzPairs = (text = "") => {
   const pairs = [];
 
   for (let i = 0; i < lines.length - 1; i++) {
-    const line1 = lines[i];
-    const line2 = lines[i + 1];
+    let line1 = lines[i];
+    let line2 = lines[i + 1];
 
-    // Do not pad short OCR lines. Padding can shift all MRZ fields.
-    if (
-      line1.length >= 40 &&
-      line1.length <= 48 &&
-      line2.length >= 40 &&
-      line2.length <= 48
-    ) {
-      // Only trim surplus OCR characters when the line clearly
-      // begins with a valid passport MRZ marker.
-      let first = line1;
-      let second = line2;
+    if (line1.length < 35 || line2.length < 35) {
+      continue;
+    }
 
-      if (first.length > 44) first = first.slice(0, 44);
-      if (second.length > 44) second = second.slice(0, 44);
+    if (!line1.startsWith("P")) {
+      continue;
+    }
 
-      if (first.length === 44 && second.length === 44) {
-        pairs.push([first, second]);
-      }
+    if (line1.length > 44) {
+      line1 = line1.substring(0, 44);
+    }
+
+    if (line2.length > 44) {
+      line2 = line2.substring(0, 44);
+    }
+
+    if (line1.length === 44 && line2.length === 44) {
+      pairs.push([line1, line2]);
     }
   }
 
   return pairs;
 };
 
-const isValidPassportResult = (result) => {
-  if (!result || !result.fields) return false;
+// =====================================================
+// PASSPORT NAME EXTRACTION
+//
+// TD3 Passport MRZ name format:
+// P<INDYADAV<<TANIKA<PRIYA<<<<<<<<
+//
+// Surname     = YADAV
+// Given names = TANIKA PRIYA
+//
+// First Name  = TANIKA PRIYA
+// Last Name   = YADAV
+// =====================================================
 
-  // Require the parser's validation result to be true.
-  // Do not auto-fill from a merely parseable but invalid MRZ.
-  if (result.valid !== true) return false;
+const cleanMrzName = (value = "") => {
+  return String(value)
+    .toUpperCase()
+    .replace(/</g, " ")
+    .replace(/[^A-Z\s'-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
 
-  const fields = result.fields;
+const isValidMrzName = (value = "") => {
+  if (!value) {
+    return false;
+  }
 
-  const passportNumber = String(fields.documentNumber || "")
-    .replace(/</g, "")
-    .trim()
-    .toUpperCase();
-
-  const nationality = String(fields.nationality || "")
-    .trim()
-    .toUpperCase();
-
-  const birthDate = String(fields.birthDate || "").replace(/\D/g, "");
+  const words = value.split(/\s+/).filter(Boolean);
 
   return (
-    /^[A-Z0-9]{6,12}$/.test(passportNumber) &&
-    /^[A-Z]{3}$/.test(nationality) &&
-    /^\d{6}$/.test(birthDate) &&
-    Boolean(parseMrzDate(birthDate)) &&
-    Boolean(fields.firstName || fields.lastName)
+    words.length >= 1 &&
+    words.length <= 6 &&
+    words.every((word) => /^[A-Z][A-Z'-]*$/.test(word)) &&
+    !/\b(PASSPORT|REPUBLIC|INDIA|SURNAME|GIVEN|NAME)\b/.test(value)
   );
 };
 
+const extractNamesFromMrzLine = (mrzLine = "", parsedFields = {}) => {
+  const line = normalizeMrzLine(mrzLine);
+
+  console.log("MRZ NAME LINE:", line);
+
+  let firstName = "";
+  let lastName = "";
+
+  // First, try the MRZ parser's returned name fields.
+  // Different mrz package versions may expose different field names.
+  const parsedGivenNames =
+    parsedFields.firstName ||
+    parsedFields.givenNames ||
+    parsedFields.givenName ||
+    "";
+
+  const parsedSurname =
+    parsedFields.lastName ||
+    parsedFields.surname ||
+    parsedFields.familyName ||
+    "";
+
+  firstName = cleanMrzName(parsedGivenNames);
+  lastName = cleanMrzName(parsedSurname);
+
+  // If either name is missing, extract from the original MRZ name line.
+  if (
+    (!firstName || !lastName) &&
+    line.startsWith("P<") &&
+    line.length >= 10
+  ) {
+    // TD3:
+    // 0-1 = P<
+    // 2-4 = issuing country
+    // 5 onward = surname<<given names
+    const nameSection = line.substring(5);
+    const separatorIndex = nameSection.indexOf("<<");
+
+    if (separatorIndex !== -1) {
+      const mrzSurname = cleanMrzName(
+        nameSection.substring(0, separatorIndex)
+      );
+
+      const mrzGivenNames = cleanMrzName(
+        nameSection.substring(separatorIndex + 2)
+      );
+
+      if (!lastName && isValidMrzName(mrzSurname)) {
+        lastName = mrzSurname;
+      }
+
+      if (!firstName && isValidMrzName(mrzGivenNames)) {
+        firstName = mrzGivenNames;
+      }
+    }
+  }
+
+  if (!isValidMrzName(firstName)) {
+    firstName = "";
+  }
+
+  if (!isValidMrzName(lastName)) {
+    lastName = "";
+  }
+
+  console.log("MRZ NAME RESULT:", {
+    firstName,
+    lastName,
+  });
+
+  return {
+    firstName,
+    lastName,
+  };
+};
+
 // =====================================================
-// EXTRACT PASSPORT DATA
+// NATIONALITY
+// =====================================================
+
+const normalizeNationality = (value = "") => {
+  const v = String(value)
+    .toUpperCase()
+    .replace(/[^A-Z ]/g, "")
+    .trim();
+
+  const map = {
+    IND: "Indian",
+    INDIA: "Indian",
+    INDIAN: "Indian",
+    ARE: "United Arab Emirates",
+    UAE: "United Arab Emirates",
+    USA: "United States",
+    GBR: "United Kingdom",
+    CAN: "Canada",
+    AUS: "Australia",
+  };
+
+  return map[v] || "";
+};
+
+// =====================================================
+// SEX
+// =====================================================
+
+const normalizeSex = (value = "") => {
+  const v = String(value)
+    .toUpperCase()
+    .replace(/[^A-Z]/g, "");
+
+  if (v === "M" || v === "MALE") {
+    return "Male";
+  }
+
+  if (v === "F" || v === "FEMALE") {
+    return "Female";
+  }
+
+  return "";
+};
+
+// =====================================================
+// DATE EXTRACTION FROM OCR
+// =====================================================
+
+const extractDateFromText = (text = "") => {
+  const formats = [
+    /(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4})/,
+    /(\d{4})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{1,2})/,
+  ];
+
+  for (const regex of formats) {
+    const match = String(text).match(regex);
+
+    if (!match) {
+      continue;
+    }
+
+    let year;
+    let month;
+    let day;
+
+    if (match[1].length === 4) {
+      year = match[1];
+      month = match[2];
+      day = match[3];
+    } else {
+      day = match[1];
+      month = match[2];
+      year = match[3];
+    }
+
+    const date = validISODate(year, month, day);
+
+    if (date) {
+      return date;
+    }
+  }
+
+  return "";
+};
+
+// =====================================================
+// LABEL-BASED OCR HELPERS
+// =====================================================
+
+const extractLabeledValue = (lines, labels) => {
+  const regex = new RegExp(
+    `^\\s*(?:${labels.join("|")})\\s*[:.-]?\\s*(.*)$`,
+    "i"
+  );
+
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(regex);
+
+    if (!match) {
+      continue;
+    }
+
+    const sameLine = match[1]?.replace(/\s+/g, " ").trim();
+
+    if (sameLine) {
+      return sameLine;
+    }
+
+    if (lines[i + 1]) {
+      return lines[i + 1].trim();
+    }
+  }
+
+  return "";
+};
+
+// =====================================================
+// PASSPORT NORMAL OCR FIELDS
+//
+// Note: Names are intentionally NOT extracted here.
+// Name extraction must come from MRZ to avoid filling
+// unrelated OCR text into First Name / Last Name.
+// =====================================================
+
+const extractPassportFieldsFromOcr = (text = "") => {
+  const lines = cleanOcrLines(String(text).toUpperCase());
+
+  const passportNumber = extractLabeledValue(lines, [
+    "PASSPORT NO",
+    "PASSPORT NUMBER",
+    "DOCUMENT NO",
+    "DOCUMENT NUMBER",
+  ])
+    .replace(/[^A-Z0-9]/g, "")
+    .trim();
+
+  const nationality = extractLabeledValue(lines, ["NATIONALITY"]);
+
+  const sex = extractLabeledValue(lines, ["SEX", "GENDER"]);
+
+  const dobLine = extractLabeledValue(lines, [
+    "DATE OF BIRTH",
+    "DOB",
+    "BIRTH",
+  ]);
+
+  const dateOfBirth = extractDateFromText(dobLine);
+
+  const placeOfBirth = extractLabeledValue(lines, ["PLACE OF BIRTH"]);
+
+  return {
+    firstName: "",
+    lastName: "",
+
+    passportNumber: /^[A-Z0-9]{6,12}$/.test(passportNumber)
+      ? passportNumber
+      : "",
+
+    nationality: normalizeNationality(nationality),
+    sex: normalizeSex(sex),
+    dateOfBirth,
+
+    placeOfBirth: placeOfBirth
+      .replace(/[^A-Z0-9 ,.'-]/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+  };
+};
+
+// =====================================================
+// PASSPORT OCR
 // =====================================================
 
 const extractPassportData = async (req, res) => {
@@ -205,139 +484,169 @@ const extractPassportData = async (req, res) => {
       return sendError(res, 400, "Passport document is required");
     }
 
-    if (
-      req.file.mimetype &&
-      !["image/jpeg", "image/png", "image/webp"].includes(req.file.mimetype)
-    ) {
-      return sendError(
-        res,
-        400,
-        "Please upload a JPG, PNG, or WEBP passport image."
-      );
-    }
-
-    console.log("Passport OCR received:", {
-      name: req.file.originalname,
-      type: req.file.mimetype,
-      size: req.file.size,
-    });
+    console.log("Passport OCR started:", req.file.originalname);
 
     worker = await createOcrWorker();
 
-    const originalBuffer = req.file.buffer;
-    const processedFullImage = await preprocessImage(originalBuffer);
-    const processedMrzImage = await preprocessImage(originalBuffer, {
-      passport: true,
-    });
+    const images = [
+      await preprocessImage(req.file.buffer, {
+        width: 3000,
+      }),
 
-    const ocrResults = [];
+      await preprocessImage(req.file.buffer, {
+        width: 3000,
+        threshold: 160,
+      }),
 
-    // Try full image and dedicated MRZ crop using different segmentation modes.
-    // This improves detection without fabricating/padding missing characters.
-    for (const imageBuffer of [processedFullImage, processedMrzImage]) {
-      for (const pageSegMode of ["6", "11", "13"]) {
+      await preprocessImage(req.file.buffer, {
+        width: 3000,
+        threshold: 190,
+      }),
+
+      await preprocessImage(req.file.buffer, {
+        width: 3000,
+        crop: "mrz",
+      }),
+
+      await preprocessImage(req.file.buffer, {
+        width: 3000,
+        crop: "lower",
+      }),
+    ];
+
+    const ocrTexts = [];
+
+    for (const image of images) {
+      for (const mode of ["6", "11", "12"]) {
         await worker.setParameters({
-          tessedit_pageseg_mode: pageSegMode,
+          tessedit_pageseg_mode: mode,
           preserve_interword_spaces: "1",
+          user_defined_dpi: "300",
         });
 
-        const result = await worker.recognize(imageBuffer);
+        const result = await worker.recognize(image);
         const text = result?.data?.text || "";
 
         if (text.trim()) {
-          ocrResults.push(text);
+          ocrTexts.push(text);
         }
       }
     }
 
-    console.log("Passport OCR attempts completed:", ocrResults.length);
+    console.log("Passport OCR attempts:", ocrTexts.length);
 
-    let validParsedResult = null;
+    let mrzResult = null;
     let selectedMrz = null;
 
-    for (const text of ocrResults) {
+    // Find and parse the passport MRZ.
+    for (const text of ocrTexts) {
       const pairs = findPassportMrzPairs(text);
 
       for (const pair of pairs) {
         try {
-          const parsed = parse(pair, { autocorrect: true });
+          const parsed = parse(pair, {
+            autocorrect: true,
+          });
 
-          if (isValidPassportResult(parsed)) {
-            validParsedResult = parsed;
+          if (parsed?.fields?.documentNumber) {
+            mrzResult = parsed;
             selectedMrz = pair;
             break;
           }
         } catch (error) {
-          // Try the next candidate pair.
+          console.log("MRZ parse retry:", error.message);
         }
       }
 
-      if (validParsedResult) break;
+      if (mrzResult) {
+        break;
+      }
     }
 
-    if (!validParsedResult) {
+    let mrzData = {
+      firstName: "",
+      lastName: "",
+      passportNumber: "",
+      nationality: "",
+      sex: "",
+      dateOfBirth: "",
+    };
+
+    if (mrzResult && selectedMrz) {
+      const fields = mrzResult.fields;
+
+      // Important: pass parsed fields as well as the MRZ name line.
+      const names = extractNamesFromMrzLine(
+        selectedMrz[0],
+        fields
+      );
+
+      mrzData = {
+        firstName: names.firstName,
+        lastName: names.lastName,
+
+        passportNumber: String(fields.documentNumber || "")
+          .replace(/</g, "")
+          .trim()
+          .toUpperCase(),
+
+        nationality: normalizeNationality(fields.nationality),
+        sex: normalizeSex(fields.sex),
+        dateOfBirth: parseMrzDate(fields.birthDate),
+      };
+    }
+
+    console.log("MRZ DATA:", mrzData);
+
+    const combinedText = ocrTexts.join("\n");
+
+    const normalOcrData = extractPassportFieldsFromOcr(combinedText);
+
+    console.log("NORMAL OCR DATA:", normalOcrData);
+
+    const passportData = {
+      // Names are only taken from MRZ extraction.
+      // No uncertain normal OCR name fallback.
+      firstName: mrzData.firstName || "",
+      lastName: mrzData.lastName || "",
+
+      passportNumber:
+        mrzData.passportNumber ||
+        normalOcrData.passportNumber ||
+        "",
+
+      nationality:
+        mrzData.nationality ||
+        normalOcrData.nationality ||
+        "",
+
+      sex: mrzData.sex || normalOcrData.sex || "",
+
+      dateOfBirth:
+        mrzData.dateOfBirth ||
+        normalOcrData.dateOfBirth ||
+        "",
+
+      placeOfBirth: normalOcrData.placeOfBirth || "",
+    };
+
+    console.log("FINAL PASSPORT DATA:", passportData);
+
+    if (
+      !passportData.firstName &&
+      !passportData.lastName &&
+      !passportData.passportNumber
+    ) {
       return sendError(
         res,
         422,
-        "Passport could not be verified. Upload a clear, straight photo of the passport biodata page with both bottom MRZ lines fully visible."
+        "Passport details could not be read. Please upload a clear passport biodata page with both MRZ lines visible."
       );
     }
 
-    const fields = validParsedResult.fields;
-
-    const firstName = String(fields.firstName || "")
-      .replace(/<+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    const lastName = String(fields.lastName || "")
-      .replace(/<+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    const passportNumber = String(fields.documentNumber || "")
-      .replace(/</g, "")
-      .trim()
-      .toUpperCase();
-
-    const nationality = String(fields.nationality || "")
-      .trim()
-      .toUpperCase();
-
-    const sexValue = String(fields.sex || "").toUpperCase();
-
-    const sex =
-      sexValue === "M"
-        ? "Male"
-        : sexValue === "F"
-        ? "Female"
-        : "";
-
-    const dateOfBirth = parseMrzDate(fields.birthDate);
-
-    // Place of birth is not reliably encoded in the passport MRZ.
-    // Do not guess it from unrelated OCR text.
-    const passportData = {
-      firstName,
-      lastName,
-      passportNumber,
-      nationality,
-      sex,
-      dateOfBirth,
-      placeOfBirth: "",
-    };
-
-    console.log("Verified passport MRZ:", selectedMrz);
-    console.log("Passport fields extracted:", {
-      passportNumber: Boolean(passportNumber),
-      name: Boolean(firstName || lastName),
-      nationality: Boolean(nationality),
-      dateOfBirth: Boolean(dateOfBirth),
-      sex: Boolean(sex),
-    });
-
     return sendSuccess(res, 200, "Passport processed successfully", {
       data: passportData,
+      verifiedByMrz: Boolean(mrzResult),
     });
   } catch (error) {
     console.error("Passport extraction error:", error);
@@ -345,7 +654,7 @@ const extractPassportData = async (req, res) => {
     return sendError(
       res,
       500,
-      "Unable to process passport image. Please try a clearer image."
+      "Unable to process passport image. Please try a clearer passport image."
     );
   } finally {
     if (worker) {
@@ -363,156 +672,74 @@ const extractPassportData = async (req, res) => {
 // =====================================================
 
 const normalizePanCandidate = (value = "") => {
-  const compact = String(value)
+  const candidate = String(value)
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "");
 
-  // Correct only common OCR confusions at their expected positions.
-  if (compact.length !== 10) return "";
-
-  const chars = compact.split("");
-
-  const letterMap = {
-    0: "O",
-    1: "I",
-    5: "S",
-    8: "B",
-  };
-
-  const digitMap = {
-    O: "0",
-    Q: "0",
-    D: "0",
-    I: "1",
-    L: "1",
-    Z: "2",
-    S: "5",
-    G: "6",
-    B: "8",
-  };
-
-  for (let i = 0; i < 5; i++) {
-    if (!/[A-Z]/.test(chars[i])) {
-      chars[i] = letterMap[chars[i]] || chars[i];
-    }
-  }
-
-  for (let i = 5; i <= 8; i++) {
-    if (!/[0-9]/.test(chars[i])) {
-      chars[i] = digitMap[chars[i]] || chars[i];
-    }
-  }
-
-  if (!/[A-Z]/.test(chars[9])) {
-    chars[9] = letterMap[chars[9]] || chars[9];
-  }
-
-  const candidate = chars.join("");
-
-  // PAN fourth character identifies holder type.
-  // Reject an OCR result if that position is not a recognized type.
-  const validHolderTypes = "PCHFA TBLJG".replace(/\s/g, "");
-
-  if (
-    !/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(candidate) ||
-    !validHolderTypes.includes(candidate[3])
-  ) {
+  if (candidate.length !== 10) {
     return "";
   }
 
-  return candidate;
+  if (/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(candidate)) {
+    return candidate;
+  }
+
+  return "";
 };
 
 const extractPanNumber = (text = "") => {
-  const lines = cleanPanText(text);
+  const compact = String(text)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
 
-  for (const line of lines) {
-    const compact = line.replace(/[^A-Z0-9]/g, "");
+  for (let i = 0; i <= compact.length - 10; i++) {
+    const value = normalizePanCandidate(compact.substring(i, i + 10));
 
-    // Search exact 10-character windows rather than accepting
-    // arbitrary substrings from unrelated text.
-    for (let i = 0; i <= compact.length - 10; i++) {
-      const candidate = normalizePanCandidate(
-        compact.slice(i, i + 10)
-      );
-
-      if (candidate) return candidate;
+    if (value) {
+      return value;
     }
   }
 
   return "";
 };
 
-const extractPanDateOfBirth = (text = "") => {
-  const lines = cleanPanText(text);
+const splitFullName = (fullName = "") => {
+  const words = String(fullName)
+    .replace(/[^A-Z ]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
 
-  const dobLabel =
-    /\b(DATE\s+OF\s+BIRTH|DOB|DATE\s+OF\s+INCORPORATION)\b/i;
-
-  const dateRegex =
-    /(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{4})/;
-
-  for (let i = 0; i < lines.length; i++) {
-    if (!dobLabel.test(lines[i])) continue;
-
-    // Date may be printed on the same line or the following line.
-    const nearbyText = `${lines[i]} ${lines[i + 1] || ""}`;
-    const match = nearbyText.match(dateRegex);
-
-    if (!match) continue;
-
-    const isoDate = validISODate(match[3], match[2], match[1]);
-
-    if (isoDate) return isoDate;
+  if (words.length >= 2) {
+    return {
+      firstName: words.slice(0, -1).join(" "),
+      lastName: words[words.length - 1],
+    };
   }
 
-  // Do not select a random date elsewhere on the card.
-  return "";
+  return {
+    firstName: words[0] || "",
+    lastName: "",
+  };
 };
 
 const extractPanName = (text = "") => {
-  const lines = cleanPanText(text);
+  const lines = cleanOcrLines(String(text).toUpperCase());
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    if (/\bNAME\b/i.test(lines[i])) {
+      const sameLine = lines[i]
+        .replace(/^.*?\bNAME\b\s*:?\s*/i, "")
+        .trim();
 
-    // Only use an explicit NAME label; never guess from arbitrary lines.
-    const match = line.match(
-      /^\s*(?:CARD\s*HOLDER\s*)?NAME\s*[:.-]?\s*(.*)$/i
-    );
+      if (sameLine && sameLine.length > 3) {
+        return sameLine;
+      }
 
-    if (!match) continue;
-
-    const sameLineName = String(match[1] || "")
-      .replace(/[^A-Z ]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    const nextLine = String(lines[i + 1] || "")
-      .replace(/[^A-Z ]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    let candidate = sameLineName || nextLine;
-
-    // Refuse label-like or government text.
-    if (
-      !candidate ||
-      /\b(FATHER|FATHERS|DOB|DATE|INCOME|TAX|GOVERNMENT|INDIA|PERMANENT|ACCOUNT)\b/.test(
-        candidate
-      )
-    ) {
-      continue;
-    }
-
-    const words = candidate.split(/\s+/).filter(Boolean);
-
-    if (
-      words.length >= 2 &&
-      words.length <= 5 &&
-      words.every((word) => /^[A-Z]+$/.test(word))
-    ) {
-      return candidate;
+      if (lines[i + 1]) {
+        return lines[i + 1];
+      }
     }
   }
 
@@ -520,7 +747,7 @@ const extractPanName = (text = "") => {
 };
 
 // =====================================================
-// EXTRACT PAN DATA
+// PAN OCR
 // =====================================================
 
 const extractPanData = async (req, res) => {
@@ -531,72 +758,46 @@ const extractPanData = async (req, res) => {
       return sendError(res, 400, "PAN card document is required");
     }
 
-    if (
-      req.file.mimetype &&
-      !["image/jpeg", "image/png", "image/webp"].includes(req.file.mimetype)
-    ) {
-      return sendError(
-        res,
-        400,
-        "Please upload a JPG, PNG, or WEBP PAN card image."
-      );
-    }
-
-    console.log("PAN OCR received:", {
-      name: req.file.originalname,
-      type: req.file.mimetype,
-      size: req.file.size,
-    });
+    console.log("PAN OCR started:", req.file.originalname);
 
     worker = await createOcrWorker();
 
-    const processedImage = await preprocessImage(req.file.buffer);
-    const ocrTexts = [];
+    const image = await preprocessImage(req.file.buffer, {
+      width: 2800,
+    });
 
-    for (const pageSegMode of ["6", "11", "12"]) {
-      await worker.setParameters({
-        tessedit_pageseg_mode: pageSegMode,
-        preserve_interword_spaces: "1",
-      });
+    await worker.setParameters({
+      tessedit_pageseg_mode: "6",
+      preserve_interword_spaces: "1",
+      user_defined_dpi: "300",
+    });
 
-      const result = await worker.recognize(processedImage);
-      const text = result?.data?.text || "";
+    const result = await worker.recognize(image);
+    const text = result?.data?.text || "";
 
-      if (text.trim()) {
-        ocrTexts.push(text);
-      }
-    }
+    console.log("PAN OCR TEXT:", text);
 
-    // Use the best available OCR text; do not infer values from unrelated fields.
-    const combinedText = ocrTexts.join("\n");
-    console.log("PAN OCR attempts completed:", ocrTexts.length);
-
-    const panNumber = extractPanNumber(combinedText);
-    const name = extractPanName(combinedText);
-    const dateOfBirth = extractPanDateOfBirth(combinedText);
+    const panNumber = extractPanNumber(text);
+    const name = extractPanName(text);
+    const names = splitFullName(name);
+    const dateOfBirth = extractDateFromText(text);
 
     if (!panNumber) {
       return sendError(
         res,
         422,
-        "PAN number could not be verified. Upload a clear, straight image of the PAN card."
+        "PAN number could not be read. Please upload a clear PAN card image."
       );
     }
 
-    const panData = {
-      panNumber,
-      name,
-      dateOfBirth,
-    };
-
-    console.log("PAN extraction status:", {
-      panNumberVerified: true,
-      nameFound: Boolean(name),
-      dateOfBirthFound: Boolean(dateOfBirth),
-    });
-
     return sendSuccess(res, 200, "PAN card processed successfully", {
-      data: panData,
+      data: {
+        panNumber,
+        name,
+        firstName: names.firstName,
+        lastName: names.lastName,
+        dateOfBirth,
+      },
     });
   } catch (error) {
     console.error("PAN extraction error:", error);
@@ -604,7 +805,7 @@ const extractPanData = async (req, res) => {
     return sendError(
       res,
       500,
-      "Unable to process PAN card image. Please try a clearer image."
+      "Unable to process PAN card image."
     );
   } finally {
     if (worker) {
@@ -616,6 +817,10 @@ const extractPanData = async (req, res) => {
     }
   }
 };
+
+// =====================================================
+// EXPORTS
+// =====================================================
 
 module.exports = {
   extractPassportData,
